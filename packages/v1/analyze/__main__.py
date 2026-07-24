@@ -6,6 +6,13 @@ import types, os, analyze
 
 builder = []
 ## build-context ##
+#--param OLLAMA_API_KEY "$OLLAMA_API_KEY"
+def init_ollama_api_key(args, ctx):
+  value = args.get("OLLAMA_API_KEY") or os.getenv("OLLAMA_API_KEY")
+  if not value:
+    raise RuntimeError("Required secret OLLAMA_API_KEY is not configured")
+  setattr(ctx, "OLLAMA_API_KEY", value)
+builder.append(init_ollama_api_key)
 #--param OLLAMA_HOST "$OLLAMA_HOST"
 def init_ollama_host(args, ctx):
   value = args.get("OLLAMA_HOST") or os.getenv("OLLAMA_HOST")

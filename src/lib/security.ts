@@ -93,7 +93,7 @@ export async function analyzeCode(req: AnalyzeRequest): Promise<AnalyzeResponse>
     const message =
       data?.error ||
       (response.status === 500
-        ? "Ollama non configurato. Imposta OLLAMA_HOST nel file .env e ridistribuisci."
+        ? "Ollama non configurato. Imposta OLLAMA_HOST (URL, es. https://ollama.com) e, per Ollama Cloud, OLLAMA_API_KEY nel file .env, poi ridistribuisci."
         : `Richiesta fallita: ${response.status}`);
     return { ok: false, error: message };
   }

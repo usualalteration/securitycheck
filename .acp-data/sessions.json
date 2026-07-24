@@ -1,5 +1,33 @@
 [
   {
+    "sessionId": "019f95a1-424c-7b6f-8f4a-eb45f1fae9cc",
+    "agentId": "pi",
+    "cwd": "/home/nicoletta.guest/workbench/securitycheck",
+    "createdAt": "2026-07-24T19:36:46.754Z",
+    "updatedAt": "2026-07-24T19:36:46.754Z"
+  },
+  {
+    "sessionId": "019f95a0-b9fa-7524-bad2-95436280781d",
+    "agentId": "pi",
+    "cwd": "/home/nicoletta.guest/workbench/securitycheck",
+    "createdAt": "2026-07-24T19:36:14.091Z",
+    "updatedAt": "2026-07-24T19:36:14.091Z"
+  },
+  {
+    "sessionId": "019f959e-dcc8-7d83-8fcf-ddd0f4343cc5",
+    "agentId": "pi",
+    "cwd": "/home/nicoletta.guest/workbench/securitycheck",
+    "createdAt": "2026-07-24T19:34:16.148Z",
+    "updatedAt": "2026-07-24T19:34:16.148Z"
+  },
+  {
+    "sessionId": "019f959d-4581-7723-b345-ab2261f44639",
+    "agentId": "pi",
+    "cwd": "/home/nicoletta.guest/workbench/securitycheck",
+    "createdAt": "2026-07-24T19:32:30.153Z",
+    "updatedAt": "2026-07-24T19:32:30.153Z"
+  },
+  {
     "sessionId": "019f9591-ab47-7c9c-bdb5-45d4f78f5dec",
     "agentId": "pi",
     "cwd": "/home/nicoletta.guest/workbench/securitycheck",

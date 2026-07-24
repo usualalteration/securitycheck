@@ -530,7 +530,9 @@ const Index = () => {
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                   <span>
                     Modelli non disponibili: {comparison.models_failed.join(", ")}. Verifica che i modelli siano
-                    scaricati in Ollama e che <code className="font-mono">OLLAMA_HOST</code> sia impostato.
+                    disponibili in Ollama, che <code className="font-mono">OLLAMA_HOST</code> sia un URL valido
+                    (es. <code className="font-mono">https://ollama.com</code>) e, per Ollama Cloud,
+                    che <code className="font-mono">OLLAMA_API_KEY</code> sia impostato.
                   </span>
                 </div>
               )}

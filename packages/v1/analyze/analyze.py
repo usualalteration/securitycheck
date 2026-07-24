@@ -250,9 +250,28 @@ def extract_json(text):
     return None
 
 
-def call_ollama(host, model_tag, prompt, timeout):
+def normalize_host(host):
+    """Ensure OLLAMA_HOST is a real URL with an http(s) scheme.
+
+    Users sometimes store the Ollama Cloud API key in OLLAMA_HOST by mistake;
+    that value has no scheme and urllib then fails with 'unknown url type'.
+    Return a clean base URL, or raise ValueError with a clear message.
+    """
+    value = (host or "").strip()
+    if not value:
+        raise ValueError("OLLAMA_HOST non configurato")
+    if not re.match(r"^https?://", value, re.I):
+        raise ValueError(
+            "OLLAMA_HOST deve essere un URL completo (es. https://ollama.com "
+            "o http://localhost:11434). Non memorizzare qui la chiave API: "
+            "usa OLLAMA_API_KEY per la chiave."
+        )
+    return value.rstrip("/")
+
+
+def call_ollama(host, model_tag, prompt, timeout, api_key=None):
     """Call Ollama /api/chat and return the assistant message text."""
-    base = host.rstrip("/")
+    base = normalize_host(host)
     url = base + "/api/chat"
     payload = json.dumps({
         "model": model_tag,
@@ -263,10 +282,13 @@ def call_ollama(host, model_tag, prompt, timeout):
         ],
         "options": {"temperature": 0.2},
     }).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
         url,
         data=payload,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        headers=headers,
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
@@ -280,7 +302,7 @@ def call_ollama(host, model_tag, prompt, timeout):
     return content
 
 
-def analyze_with_model(host, model, prompt, timeout):
+def analyze_with_model(host, model, prompt, timeout, api_key=None):
     """Run one model, returning a structured result dict."""
     out = {
         "id": model["id"],
@@ -293,7 +315,7 @@ def analyze_with_model(host, model, prompt, timeout):
         "error": None,
     }
     try:
-        content = call_ollama(host, model["tag"], prompt, timeout)
+        content = call_ollama(host, model["tag"], prompt, timeout, api_key=api_key)
         parsed = extract_json(content) or {}
         out["report"] = content
         out["risk_level"] = str(parsed.get("risk_level") or "none").lower()
@@ -313,6 +335,8 @@ def analyze_with_model(host, model, prompt, timeout):
             })
         out["findings"] = norm
         out["ok"] = True
+    except ValueError as e:
+        out["error"] = f"Configurazione Ollama non valida: {e}"
     except urllib.error.URLError as e:
         out["error"] = f"Connessione a Ollama fallita: {e.reason if hasattr(e, 'reason') else str(e)}"
     except urllib.error.HTTPError as e:
@@ -465,6 +489,13 @@ def main(args, ctx=None):
             "ok": False,
             "error": "Ollama non configurato. Imposta OLLAMA_HOST nel file .env e ridistribuisci.",
         }
+    try:
+        normalize_host(host)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+
+    # Optional Bearer token for remote/cloud Ollama (e.g. https://ollama.com).
+    api_key = getattr(ctx, "OLLAMA_API_KEY", None) if ctx else None
 
     timeout = DEFAULT_TIMEOUT
     # Optional override only if a numeric value is supplied in the request.
@@ -493,7 +524,7 @@ def main(args, ctx=None):
     results = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(MODELS)) as pool:
         futures = {
-            pool.submit(analyze_with_model, host, m, prompt, timeout): m
+            pool.submit(analyze_with_model, host, m, prompt, timeout, api_key=api_key): m
             for m in MODELS
         }
         for fut in concurrent.futures.as_completed(futures):

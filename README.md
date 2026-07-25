@@ -26,36 +26,52 @@ Frontend in React + TypeScript, backend serverless su **Apache OpenWhisk / Nuvol
 
 ## Configurazione di Ollama
 
-Nel file `.env` è presente la variabile **vuota** `OLLAMA_HOST`, pronta per essere
-compilata:
+Nel file `.env` sono presenti le variabili per Ollama:
 
 ```env
-# Base URL della tua istanza Ollama, es. http://localhost:11434
+# Base URL dell'istanza Ollama
+#  - locale:   http://localhost:11434
+#  - cloud:    https://ollama.com  (richiede OLLAMA_API_KEY)
 OLLAMA_HOST=
+
+# Obbligatoria solo per Ollama Cloud (https://ollama.com)
+# lascia vuota se usi un'istanza locale senza autenticazione
+OLLAMA_API_KEY=
 ```
 
 Per attivare l'analisi:
 
-1. Installa e avvia Ollama (`ollama serve`).
-2. Scarica i modelli richiesti:
-   ```bash
-   ollama pull glm-5.2
-   ollama pull kimi-k2.7-code
-   ollama pull deepseek-v4-pro
-   ```
-3. Imposta `OLLAMA_HOST` nel file `.env` (es. `OLLAMA_HOST=http://localhost:11434`).
+1. Avvia Ollama (`ollama serve`) oppure usa Ollama Cloud.
+2. Assicurati che i modelli richiesti siano disponibili:
+   - `glm-5.2`
+   - `kimi-k2.7-code`
+   - `deepseek-v4-pro`
+   (con Ollama locale: `ollama pull glm-5.2` ecc.)
+3. Imposta `OLLAMA_HOST` (e `OLLAMA_API_KEY` per il cloud) nel file `.env`.
 4. Ridistribuisci:
    ```bash
    timeout 120 ops ide deploy
    ```
 
-Se `OLLAMA_HOST` resta vuoto, l'action `v1/analyze` fallisce in modo controllato
-restituendo l'errore "Required secret OLLAMA_HOST is not configured".
+Se `OLLAMA_HOST` (o `OLLAMA_API_KEY` per il cloud) resta vuoto, l'action
+fallisce in modo controllato segnalando "Required secret ... is not configured".
+
+## Architettura del backend
+
+- `v1/analyze` (GET): endpoint informativo (elenca i modelli disponibili).
+- `v1/analyze-model` (POST): analizza il sorgente con **un solo modello**.
+  Il frontend la chiama **una volta per modello, sequenzialmente** (uno dopo
+  l'altro), così Ollama non va in contenzione e ogni modello ha a disposizione
+  tutto il tempo necessario (timeout action di 5 minuti per ciascun modello).
+  L'action ritenta automaticamente sugli errori transienti `503 / 429 / "response
+  not yet ready"` con backoff, per tollerare il caricamento dei modelli.
 
 ## Sviluppo
 
 - Frontend: `src/` (React + Tailwind). Pagina principale: `src/pages/Index.tsx`.
-- Client API: `src/lib/security.ts`.
-- Backend: `packages/v1/analyze/analyze.py` (logica modificabile),
-  `packages/v1/analyze/__main__.py` (wrapper generato, non modificare).
-- Endpoint pubblico: `POST /api/my/v1/analyze` con body JSON `{ url | code, filename?, language? }`.
+- Client API: `src/lib/security.ts`, aggregazione confronto: `src/lib/compare.ts`.
+- Backend: `packages/v1/analyze/analyze.py` (info, modificabile) e
+  `packages/v1/analyze-model/analyze_model.py` (analisi singolo modello,
+  modificabile). I `__main__.py` sono wrapper generati, non modificare.
+- Endpoint: `GET /api/my/v1/analyze` (info) e
+  `POST /api/my/v1/analyze-model` con body `{ url | code, model, filename?, language? }`.

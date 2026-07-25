@@ -15,21 +15,24 @@ import {
   Cpu,
   Gauge,
   ListChecks,
+  Circle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  analyzeCode,
+  analyzeWithModel,
   getServiceInfo,
-  type AnalyzeResponse,
-  type Finding,
-  type GroupedFinding,
+  MODELS,
+  type AnalyzeModelResponse,
   type ModelResult,
   type Severity,
+  type SourceMeta,
 } from "@/lib/security";
+import { buildComparison, type Comparison } from "@/lib/compare";
 
 type Mode = "url" | "code";
+type ModelStatus = "pending" | "running" | "done" | "error";
 
 const SEVERITY_STYLES: Record<Severity, { badge: string; dot: string; label: string }> = {
   critical: { badge: "bg-red-100 text-red-800 border-red-300 dark:bg-red-950/60 dark:text-red-300 dark:border-red-800", dot: "bg-red-500", label: "Critico" },
@@ -72,7 +75,7 @@ function RiskBadge({ risk }: { risk: string }) {
   );
 }
 
-function FindingCard({ finding, showModel }: { finding: Finding; showModel?: string }) {
+function FindingCard({ finding, showModel }: { finding: ModelResult["findings"][number]; showModel?: string }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="rounded-lg border border-border bg-card p-4">
@@ -194,7 +197,7 @@ function ModelReportCard({ result }: { result: ModelResult }) {
   );
 }
 
-function GroupedFindingCard({ g, isCommon }: { g: GroupedFinding; isCommon: boolean }) {
+function GroupedFindingCard({ g, isCommon }: { g: Comparison["common"][number]; isCommon: boolean }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="rounded-lg border border-border bg-card p-4">
@@ -250,6 +253,31 @@ function GroupedFindingCard({ g, isCommon }: { g: GroupedFinding; isCommon: bool
   );
 }
 
+function ModelProgressRow({ name, status }: { name: string; status: ModelStatus }) {
+  const icon =
+    status === "running" ? (
+      <Loader2 className="h-4 w-4 animate-spin text-primary" />
+    ) : status === "done" ? (
+      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+    ) : status === "error" ? (
+      <XCircle className="h-4 w-4 text-red-500" />
+    ) : (
+      <Circle className="h-4 w-4 text-muted-foreground/40" />
+    );
+  const label =
+    status === "running" ? "analisi in corso..." :
+    status === "done" ? "completato" :
+    status === "error" ? "errore" :
+    "in attesa";
+  return (
+    <li className="flex items-center gap-2 text-sm">
+      {icon}
+      <span className="font-medium text-foreground">{name}</span>
+      <span className="text-muted-foreground">— {label}</span>
+    </li>
+  );
+}
+
 const Index = () => {
   const [mode, setMode] = useState<Mode>("url");
   const [url, setUrl] = useState("");
@@ -258,20 +286,38 @@ const Index = () => {
   const [language, setLanguage] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<AnalyzeResponse | null>(null);
   const [available, setAvailable] = useState<string[] | null>(null);
 
-  // Discover whether the backend is up and which models are configured.
+  // Per-model live progress.
+  const [modelStatus, setModelStatus] = useState<Record<string, ModelStatus>>({});
+  const [modelResults, setModelResults] = useState<ModelResult[]>([]);
+  const [source, setSource] = useState<SourceMeta | null>(null);
+  const [comparison, setComparison] = useState<Comparison | null>(null);
+
   useEffect(() => {
     getServiceInfo().then((info) => {
-      if (info?.models) setAvailable(info.models as unknown as string[]);
+      if (info?.models) setAvailable(info.models);
     });
   }, []);
+
+  function reset() {
+    setError(null);
+    setComparison(null);
+    setModelResults([]);
+    setModelStatus({});
+    setSource(null);
+    setUrl("");
+    setCode("");
+    setFilename("");
+    setLanguage("");
+  }
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setError(null);
-    setResult(null);
+    setComparison(null);
+    setModelResults([]);
+    setSource(null);
 
     if (mode === "url" && !url.trim()) {
       setError("Inserisci un URL valido.");
@@ -282,37 +328,94 @@ const Index = () => {
       return;
     }
 
+    const baseReq = {
+      url: mode === "url" ? url.trim() : undefined,
+      code: mode === "code" ? code : undefined,
+      filename: filename.trim() || undefined,
+      language: language.trim() || undefined,
+    };
+
+    // Initialize progress for every model.
+    const initialStatus: Record<string, ModelStatus> = {};
+    for (const m of MODELS) initialStatus[m.id] = "pending";
+    setModelStatus(initialStatus);
+
     setLoading(true);
-    try {
-      const res = await analyzeCode({
-        url: mode === "url" ? url.trim() : undefined,
-        code: mode === "code" ? code : undefined,
-        filename: filename.trim() || undefined,
-        language: language.trim() || undefined,
-      });
-      if (!res.ok || res.error) {
-        setError(res.error || "Analisi non riuscita.");
-      } else {
-        setResult(res);
+
+    const results: ModelResult[] = [];
+    let firstSource: SourceMeta | null = null;
+    let hardError: string | null = null;
+
+    // Call models ONE AT A TIME, sequentially, so Ollama handles a single
+    // request at a time (avoids "response not yet ready"). Each call gets the
+    // full 5-minute action timeout for itself.
+    for (const m of MODELS) {
+      setModelStatus((prev) => ({ ...prev, [m.id]: "running" }));
+      try {
+        const res: AnalyzeModelResponse = await analyzeWithModel({ ...baseReq, model: m.id });
+        if (firstSource === null && res.source) firstSource = res.source;
+
+        if (!res.ok || !res.model) {
+          const failed: ModelResult = {
+            id: m.id,
+            name: m.name,
+            ok: false,
+            risk_level: "none",
+            summary: "",
+            findings: [],
+            report: "",
+            error: res.error || "Analisi non riuscita.",
+          };
+          results.push(failed);
+          setModelStatus((prev) => ({ ...prev, [m.id]: "error" }));
+          // If the backend itself is not configured (e.g. OLLAMA_HOST empty),
+          // stop early: every model would fail the same way.
+          if (res.error && /OLLAMA_HOST|non configurato/i.test(res.error)) {
+            hardError = res.error;
+            for (const rest of MODELS) {
+              if (rest.id !== m.id) setModelStatus((prev) => ({ ...prev, [rest.id]: "error" }));
+            }
+            break;
+          }
+        } else {
+          results.push(res.model);
+          setModelStatus((prev) => ({ ...prev, [m.id]: "done" }));
+        }
+        // Live update: show each model's report as soon as it is ready.
+        setModelResults([...results]);
+      } catch (err) {
+        const failed: ModelResult = {
+          id: m.id,
+          name: m.name,
+          ok: false,
+          risk_level: "none",
+          summary: "",
+          findings: [],
+          report: "",
+          error: err instanceof Error ? err.message : "Errore di rete imprevisto.",
+        };
+        results.push(failed);
+        setModelResults([...results]);
+        setModelStatus((prev) => ({ ...prev, [m.id]: "error" }));
       }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Errore di rete imprevisto.");
-    } finally {
-      setLoading(false);
     }
+
+    setLoading(false);
+
+    if (hardError) {
+      setError(hardError);
+      return;
+    }
+    if (!firstSource && results.every((r) => !r.ok)) {
+      setError("Nessun modello ha prodotto un risultato. Verifica la configurazione di Ollama.");
+      return;
+    }
+
+    setSource(firstSource);
+    setComparison(buildComparison(results));
   }
 
-  function reset() {
-    setResult(null);
-    setError(null);
-    setUrl("");
-    setCode("");
-    setFilename("");
-    setLanguage("");
-  }
-
-  const comparison = result?.comparison;
-  const source = result?.source;
+  const showResults = comparison !== null && !loading;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-background via-background to-muted">
@@ -338,7 +441,7 @@ const Index = () => {
       </header>
 
       <main className="mx-auto max-w-6xl px-4 py-8">
-        {!result && !loading && (
+        {!showResults && !loading && (
           <div className="mx-auto max-w-3xl">
             <div className="mb-6 text-center">
               <h2 className="text-2xl font-bold text-foreground sm:text-3xl">
@@ -346,7 +449,7 @@ const Index = () => {
               </h2>
               <p className="mt-2 text-muted-foreground">
                 Fornisci un file di codice (URL Raw/Gist) oppure incolla il sorgente.
-                Tre modelli AI lo analizzano in parallelo e confrontano le vulnerabilità trovate.
+                Tre modelli AI lo analizzano uno alla volta e confrontano le vulnerabilità trovate.
               </p>
             </div>
 
@@ -463,17 +566,39 @@ const Index = () => {
           </div>
         )}
 
+        {/* Loading: per-model progress + live results */}
         {loading && (
-          <div className="mx-auto flex max-w-3xl flex-col items-center justify-center py-24 text-center">
-            <Loader2 className="h-10 w-10 animate-spin text-primary" />
-            <h2 className="mt-4 text-lg font-semibold text-foreground">Analisi in corso...</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Tre modelli stanno analizzando il codice in parallelo. Può richiedere qualche minuto.
-            </p>
+          <div className="mx-auto max-w-5xl">
+            <div className="rounded-xl border border-border bg-card p-6 shadow-sm">
+              <div className="flex items-center gap-3">
+                <Loader2 className="h-5 w-5 animate-spin text-primary" />
+                <div>
+                  <h2 className="text-lg font-semibold text-foreground">Analisi in corso...</h2>
+                  <p className="text-sm text-muted-foreground">
+                    I modelli vengono chiamati uno alla volta, così Ollama non va in contenzione.
+                    Ognuno ha a disposizione tutto il tempo necessario.
+                  </p>
+                </div>
+              </div>
+              <ul className="mt-4 space-y-2">
+                {MODELS.map((m) => (
+                  <ModelProgressRow key={m.id} name={m.name} status={modelStatus[m.id] ?? "pending"} />
+                ))}
+              </ul>
+            </div>
+
+            {modelResults.length > 0 && (
+              <div className="mt-6 grid gap-4 lg:grid-cols-3">
+                {modelResults.map((m) => (
+                  <ModelReportCard key={m.id} result={m} />
+                ))}
+              </div>
+            )}
           </div>
         )}
 
-        {result && !loading && comparison && (
+        {/* Final results */}
+        {showResults && comparison && (
           <div className="space-y-8">
             {/* Top bar: source + overall risk + reset */}
             <div className="flex flex-wrap items-center justify-between gap-4">
@@ -484,8 +609,8 @@ const Index = () => {
                 <div>
                   <p className="text-sm text-muted-foreground">Risultato analisi</p>
                   <p className="font-semibold text-foreground">
-                    {source?.language || "Codice"} · {source?.lines ?? 0} righe · {(source?.size ?? 0)} byte
-                    {source?.type === "url" && source.url ? ` · da URL` : " · da input"}
+                    {source?.language || "Codice"} · {source?.lines ?? 0} righe · {source?.size ?? 0} byte
+                    {source?.type === "url" && source.url ? " · da URL" : " · da input"}
                   </p>
                 </div>
               </div>
@@ -519,20 +644,18 @@ const Index = () => {
                 </div>
                 <div className="rounded-lg border border-border bg-muted/40 p-4 text-center">
                   <p className="text-2xl font-bold text-foreground">
-                    {comparison.models_ok.length}/{result.models?.length ?? 3}
+                    {comparison.models_ok.length}/{MODELS.length}
                   </p>
                   <p className="text-xs text-muted-foreground">Modelli attivi</p>
                 </div>
               </div>
 
-              {comparison.models_failed && comparison.models_failed.length > 0 && (
+              {comparison.models_failed.length > 0 && (
                 <div className="mt-4 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
                   <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                   <span>
                     Modelli non disponibili: {comparison.models_failed.join(", ")}. Verifica che i modelli siano
-                    disponibili in Ollama, che <code className="font-mono">OLLAMA_HOST</code> sia un URL valido
-                    (es. <code className="font-mono">https://ollama.com</code>) e, per Ollama Cloud,
-                    che <code className="font-mono">OLLAMA_API_KEY</code> sia impostato.
+                    scaricati in Ollama e che <code className="font-mono">OLLAMA_HOST</code> sia impostato.
                   </span>
                 </div>
               )}
@@ -579,7 +702,7 @@ const Index = () => {
                 <h3 className="text-lg font-semibold text-foreground">Report per modello</h3>
               </div>
               <div className="grid gap-4 lg:grid-cols-3">
-                {result.models?.map((m) => (
+                {modelResults.map((m) => (
                   <ModelReportCard key={m.id} result={m} />
                 ))}
               </div>

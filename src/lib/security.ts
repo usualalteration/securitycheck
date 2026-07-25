@@ -1,4 +1,4 @@
-// Client for the v1/analyze OpenServerless action.
+// Client for the OpenServerless actions (v1/analyze info + v1/analyze-model).
 
 export type Severity = "critical" | "high" | "medium" | "low" | "info" | "none";
 
@@ -44,25 +44,12 @@ export interface GroupedFinding {
   model?: string;
 }
 
-export interface Comparison {
-  common: GroupedFinding[];
-  unique: GroupedFinding[];
-  overall_risk: string;
-  overall_score: number;
-  summary: string;
-  models_ok: string[];
-  models_failed: string[];
-}
-
-export interface AnalyzeResponse {
-  ok: boolean;
-  error?: string;
-  source?: SourceMeta;
-  models?: ModelResult[];
-  comparison?: Comparison;
-  service?: string;
-  description?: string;
-}
+// Known models, in display order. Must match the backend MODELS dict.
+export const MODELS: { id: string; name: string }[] = [
+  { id: "glm-5.2", name: "GLM 5.2" },
+  { id: "kimi-k2.7-code", name: "Kimi K2.7 Code" },
+  { id: "deepseek-v4-pro", name: "DeepSeek V4 Pro" },
+];
 
 export interface AnalyzeRequest {
   url?: string;
@@ -71,39 +58,67 @@ export interface AnalyzeRequest {
   language?: string;
 }
 
-async function unwrap(response: Response): Promise<AnalyzeResponse> {
-  const raw = await response.json().catch(() => ({} as Record<string, unknown>));
-  const data =
-    raw && typeof raw === "object" && "body" in raw && typeof (raw as Record<string, unknown>).body === "object"
-      ? ((raw as Record<string, unknown>).body as AnalyzeResponse)
-      : (raw as AnalyzeResponse);
-  return data as AnalyzeResponse;
+export interface ModelAnalyzeRequest extends AnalyzeRequest {
+  model: string;
 }
 
-export async function analyzeCode(req: AnalyzeRequest): Promise<AnalyzeResponse> {
-  const response = await fetch("/api/my/v1/analyze", {
+export interface AnalyzeModelResponse {
+  ok: boolean;
+  error?: string;
+  source?: SourceMeta;
+  model?: ModelResult;
+}
+
+export interface ServiceInfo {
+  ok: boolean;
+  service?: string;
+  models?: string[];
+  description?: string;
+  model_endpoint?: string;
+}
+
+async function unwrap<T>(response: Response): Promise<T> {
+  const raw = await response.json().catch(() => ({} as Record<string, unknown>));
+  const obj =
+    raw && typeof raw === "object" && "body" in raw && typeof (raw as Record<string, unknown>).body === "object"
+      ? ((raw as Record<string, unknown>).body as T)
+      : (raw as T);
+  return obj as T;
+}
+
+/**
+ * Analyze source code with a single model.
+ * The frontend calls this once per model, sequentially (awaiting each before
+ * the next), so Ollama only handles one request at a time. Each call gets the
+ * full 5-minute action timeout for itself, so the model can take all the time
+ * it needs. The backend also retries on "response not yet ready".
+ */
+export async function analyzeWithModel(
+  req: ModelAnalyzeRequest,
+): Promise<AnalyzeModelResponse> {
+  const response = await fetch("/api/my/v1/analyze-model", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
   });
 
-  const data = await unwrap(response);
+  const data = await unwrap<AnalyzeModelResponse>(response);
 
   if (!response.ok || data?.ok === false || data?.error) {
     const message =
       data?.error ||
       (response.status === 500
-        ? "Ollama non configurato. Imposta OLLAMA_HOST (URL, es. https://ollama.com) e, per Ollama Cloud, OLLAMA_API_KEY nel file .env, poi ridistribuisci."
+        ? "Ollama non configurato. Imposta OLLAMA_HOST nel file .env e ridistribuisci."
         : `Richiesta fallita: ${response.status}`);
     return { ok: false, error: message };
   }
   return data;
 }
 
-export async function getServiceInfo(): Promise<AnalyzeResponse | null> {
+export async function getServiceInfo(): Promise<ServiceInfo | null> {
   try {
     const response = await fetch("/api/my/v1/analyze", { method: "GET" });
-    const data = (await unwrap(response)) as AnalyzeResponse;
+    const data = await unwrap<ServiceInfo>(response);
     if (data && data.service) return data;
     return null;
   } catch {

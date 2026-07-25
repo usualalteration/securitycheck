@@ -1,5 +1,12 @@
 [
   {
+    "sessionId": "019f9851-b6de-7f91-b3a0-f6ae74906d26",
+    "agentId": "pi",
+    "cwd": "/home/nicoletta.guest/workbench/securitycheck",
+    "createdAt": "2026-07-25T08:08:47.284Z",
+    "updatedAt": "2026-07-25T08:08:47.284Z"
+  },
+  {
     "sessionId": "019f95c0-79b8-7481-ad81-7dde99804095",
     "agentId": "pi",
     "cwd": "/home/nicoletta.guest/workbench/securitycheck",

@@ -31,7 +31,10 @@ MODELS = {
     "deepseek-v4-pro": {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "tag": "deepseek-v4-pro"},
 }
 
-DEFAULT_MODEL_TIMEOUT = 240  # seconds per Ollama HTTP call (within 5-min action)
+# No per-call timeout: let Ollama take all the time it needs and respond
+# when it is free. The action-level timeout (set in __main__.py) is the only
+# upper bound.
+DEFAULT_MODEL_TIMEOUT = None
 MAX_SOURCE_BYTES = 512 * 1024
 MAX_DOWNLOAD_BYTES = 1024 * 1024
 
@@ -388,11 +391,13 @@ def main(args, ctx=None):
         }
     model = MODELS[model_id]
 
+    # No timeout cap: the caller may pass an explicit timeout, otherwise we
+    # wait indefinitely for the model to respond when it is free.
     timeout = DEFAULT_MODEL_TIMEOUT
     req_timeout = data.get("timeout")
     if req_timeout:
         try:
-            timeout = max(30, min(int(req_timeout), 280))
+            timeout = int(req_timeout) if int(req_timeout) > 0 else None
         except (TypeError, ValueError):
             pass
 

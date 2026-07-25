@@ -1,7 +1,8 @@
 #--kind python:default
 #--web true
-# Note: this timeout is 5 minutes - 10 minutes is max allowed
-#--timeout 300000
+# Note: this timeout is 10 minutes - the max allowed - so models can
+# respond when they are free without being cut off.
+#--timeout 600000
 import types, os, analyze_model
 
 builder = []

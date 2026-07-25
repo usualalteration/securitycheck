@@ -347,8 +347,8 @@ const Index = () => {
     let hardError: string | null = null;
 
     // Call models ONE AT A TIME, sequentially, so Ollama handles a single
-    // request at a time (avoids "response not yet ready"). Each call gets the
-    // full 5-minute action timeout for itself.
+    // request at a time (avoids "response not yet ready"). No per-call
+    // timeout: each model can respond when it is free (action max 10 min).
     for (const m of MODELS) {
       setModelStatus((prev) => ({ ...prev, [m.id]: "running" }));
       try {

@@ -1,5 +1,19 @@
 [
   {
+    "sessionId": "019f9863-de97-79bf-8bc2-7c2a4e5663df",
+    "agentId": "pi",
+    "cwd": "/home/nicoletta.guest/workbench/securitycheck",
+    "createdAt": "2026-07-25T08:28:37.009Z",
+    "updatedAt": "2026-07-25T08:28:37.009Z"
+  },
+  {
+    "sessionId": "019f9859-3a12-798c-9b78-4129d3af7d40",
+    "agentId": "pi",
+    "cwd": "/home/nicoletta.guest/workbench/securitycheck",
+    "createdAt": "2026-07-25T08:17:00.998Z",
+    "updatedAt": "2026-07-25T08:17:00.998Z"
+  },
+  {
     "sessionId": "019f9851-b6de-7f91-b3a0-f6ae74906d26",
     "agentId": "pi",
     "cwd": "/home/nicoletta.guest/workbench/securitycheck",

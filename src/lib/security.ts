@@ -89,9 +89,10 @@ async function unwrap<T>(response: Response): Promise<T> {
 /**
  * Analyze source code with a single model.
  * The frontend calls this once per model, sequentially (awaiting each before
- * the next), so Ollama only handles one request at a time. Each call gets the
- * full 5-minute action timeout for itself, so the model can take all the time
- * it needs. The backend also retries on "response not yet ready".
+ * the next), so Ollama only handles one request at a time. There is no
+ * per-call timeout: the model can take all the time it needs and respond when
+ * it is free. The action-level timeout is 10 minutes (the platform max) and
+ * the backend also retries on "response not yet ready".
  */
 export async function analyzeWithModel(
   req: ModelAnalyzeRequest,

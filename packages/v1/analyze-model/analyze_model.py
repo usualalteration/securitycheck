@@ -6,9 +6,10 @@ sequentially (one after another), so Ollama only ever handles one request at a
 time. That avoids the "response not yet ready" 503 that Ollama returns when it is
 still loading a model or when several requests contend for the runtime.
 
-Each call gets the full 5-minute action budget for itself, so the model can take
-all the time it needs. A retry-with-backoff loop additionally tolerates the
-residual 503 "response not yet ready" / loading errors.
+Each call gets up to 3 minutes (180s) to connect and respond. The frontend
+drives the retry loop: 1 attempt + 4 retries with 3s pauses (5 total). If all 5
+fail the UI shows a "riprova" button for that model. The backend therefore
+performs a single attempt per invocation, bounded by the 180s timeout.
 
 Input:
   - url:    URL of a raw source file to download and validate, OR
@@ -31,16 +32,18 @@ MODELS = {
     "deepseek-v4-pro": {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "tag": "deepseek-v4-pro"},
 }
 
-# No per-call timeout: let Ollama take all the time it needs and respond
-# when it is free. The action-level timeout (set in __main__.py) is the only
-# upper bound.
-DEFAULT_MODEL_TIMEOUT = None
+# Per-call timeout: give the model up to 3 minutes (180s) to connect and
+# respond. The frontend drives the multi-attempt retry loop (4 retries with
+# 3s pauses -> 5 attempts total), so the backend performs a single attempt
+# per invocation. This keeps each HTTP request bounded and predictable.
+DEFAULT_MODEL_TIMEOUT = 180
 MAX_SOURCE_BYTES = 512 * 1024
 MAX_DOWNLOAD_BYTES = 1024 * 1024
 
-# Retry tuning for "response not yet ready" (model still loading / busy).
-MAX_RETRIES = 4
-RETRY_BACKOFF = [3, 6, 10, 15]  # seconds to sleep before each retry
+# Single attempt per call: the frontend handles the retry loop and shows the
+# "riprova" state on the button after 5 total failures.
+MAX_RETRIES = 0
+RETRY_BACKOFF = [3]  # seconds (unused when MAX_RETRIES == 0)
 TRANSIENT_MARKERS = (
     "not yet ready",
     "loading model",

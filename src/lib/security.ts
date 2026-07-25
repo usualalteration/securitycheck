@@ -87,20 +87,21 @@ async function unwrap<T>(response: Response): Promise<T> {
 }
 
 /**
- * Analyze source code with a single model.
- * The frontend calls this once per model, sequentially (awaiting each before
- * the next), so Ollama only handles one request at a time. There is no
- * per-call timeout: the model can take all the time it needs and respond when
- * it is free. The action-level timeout is 10 minutes (the platform max) and
- * the backend also retries on "response not yet ready".
+ * Analyze source code with a single model, single attempt.
+ * The backend gives the model up to 3 minutes (180s) to connect/respond.
+ * The retry loop lives in the UI: 1 attempt + 4 retries with 3s pauses
+ * (5 total); after 5 failures the model button shows "riprova".
+ * Pass an AbortSignal to enforce the 180s per-attempt timeout client-side.
  */
 export async function analyzeWithModel(
   req: ModelAnalyzeRequest,
+  signal?: AbortSignal,
 ): Promise<AnalyzeModelResponse> {
   const response = await fetch("/api/my/v1/analyze-model", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(req),
+    signal,
   });
 
   const data = await unwrap<AnalyzeModelResponse>(response);

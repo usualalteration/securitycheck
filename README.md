@@ -75,3 +75,5 @@ fallisce in modo controllato segnalando "Required secret ... is not configured".
   modificabile). I `__main__.py` sono wrapper generati, non modificare.
 - Endpoint: `GET /api/my/v1/analyze` (info) e
   `POST /api/my/v1/analyze-model` con body `{ url | code, model, filename?, language? }`.
+
+- [Code Security Checker](code-security-checker.md)

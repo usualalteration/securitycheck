@@ -303,7 +303,7 @@ def call_ollama_with_retry(host, model_tag, prompt, timeout, api_key=None):
             if e.code in (401, 403):
                 raise RuntimeError(
                     f"Ollama autenticazione fallita (HTTP {e.code}). "
-                    "Verifica OLLAMA_API_KEY per Ollama Cloud."
+                    "Verifica AI_API_KEY per Ollama Cloud."
                 )
             # 429/503 "response not yet ready" / rate limit / model loading.
             if (e.code in RETRYABLE_HTTP_CODES or _is_transient(err_text)) and attempt < MAX_RETRIES:
@@ -375,13 +375,13 @@ def main(args, ctx=None):
             "models": [m["name"] for m in MODELS.values()],
         }
 
-    host = getattr(ctx, "OLLAMA_HOST", None) if ctx else None
+    host = getattr(ctx, "AI_API_HOST", None) if ctx else None
     if not host:
         return {
             "ok": False,
-            "error": "Ollama non configurato. Imposta OLLAMA_HOST nel file .env e ridistribuisci.",
+            "error": "Ollama non configurato. Imposta AI_API_HOST nel file .env e ridistribuisci.",
         }
-    api_key = getattr(ctx, "OLLAMA_API_KEY", None) if ctx else None
+    api_key = getattr(ctx, "AI_API_KEY", None) if ctx else None
 
     data = request_data(args)
 

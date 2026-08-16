@@ -31,12 +31,12 @@ Nel file `.env` sono presenti le variabili per Ollama:
 ```env
 # Base URL dell'istanza Ollama
 #  - locale:   http://localhost:11434
-#  - cloud:    https://ollama.com  (richiede OLLAMA_API_KEY)
-OLLAMA_HOST=
+#  - cloud:    https://ollama.com  (richiede AI_API_KEY)
+AI_API_HOST=
 
 # Obbligatoria solo per Ollama Cloud (https://ollama.com)
 # lascia vuota se usi un'istanza locale senza autenticazione
-OLLAMA_API_KEY=
+AI_API_KEY=
 ```
 
 Per attivare l'analisi:
@@ -47,13 +47,13 @@ Per attivare l'analisi:
    - `kimi-k2.7-code`
    - `deepseek-v4-pro`
    (con Ollama locale: `ollama pull glm-5.2` ecc.)
-3. Imposta `OLLAMA_HOST` (e `OLLAMA_API_KEY` per il cloud) nel file `.env`.
+3. Imposta `AI_API_HOST` (e `AI_API_KEY` per il cloud) nel file `.env`.
 4. Ridistribuisci:
    ```bash
    timeout 120 ops ide deploy
    ```
 
-Se `OLLAMA_HOST` (o `OLLAMA_API_KEY` per il cloud) resta vuoto, l'action
+Se `AI_API_HOST` (o `AI_API_KEY` per il cloud) resta vuoto, l'action
 fallisce in modo controllato segnalando "Required secret ... is not configured".
 
 ## Architettura del backend

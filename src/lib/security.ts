@@ -31,19 +31,6 @@ export interface ModelResult {
   error: string | null;
 }
 
-export interface GroupedFinding {
-  title: string;
-  severity: Severity;
-  severity_label: string;
-  category: string;
-  models: string[];
-  agreement: number;
-  description: string;
-  descriptions?: { model: string; text: string }[];
-  recommendations?: { model: string; text: string }[];
-  model?: string;
-}
-
 /**
  * A model discovered dynamically from the provider's model-listing API.
  * The id is the exact value sent back to the inference action; `name` is a

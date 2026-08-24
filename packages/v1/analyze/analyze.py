@@ -2,14 +2,12 @@
 v1/analyze - service info endpoint.
 
 The actual per-model analysis is performed by the sibling action v1/analyze-model,
-which the frontend calls once per model, sequentially, so Ollama only handles one
-request at a time (avoids the "response not yet ready" 503).
+which the frontend calls with the model id selected by the user from the
+dynamic list discovered by v1/models.
 
-This action only exposes a lightweight GET service descriptor used by the
-frontend to discover the available models.
+This action only exposes a lightweight GET service descriptor. It no longer
+hardcodes any model list: model discovery is delegated to v1/models.
 """
-
-MODELS = ["GLM 5.2", "Kimi K2.7 Code", "DeepSeek V4 Pro"]
 
 
 def request_data(args):
@@ -33,15 +31,15 @@ def main(args, ctx=None):
         return {
             "ok": True,
             "service": "securitycheck",
-            "models": MODELS,
-            "description": "Analisi di sicurezza del codice sorgente con 3 modelli Ollama in parallelo.",
+            "models_endpoint": "/api/my/v1/models",
+            "description": "Analisi di sicurezza del codice sorgente con il modello AI selezionato.",
             "model_endpoint": "/api/my/v1/analyze-model",
         }
-    # POST is intentionally not used anymore: the frontend orchestrates one
-    # v1/analyze-model call per model sequentially.
+    # POST is intentionally not used anymore: the frontend orchestrates the
+    # analysis through v1/analyze-model using the model selected from v1/models.
     return {
         "ok": False,
-        "error": "Usa /api/my/v1/analyze-model per analizzare un singolo modello.",
+        "error": "Usa /api/my/v1/analyze-model per analizzare con il modello selezionato.",
         "model_endpoint": "/api/my/v1/analyze-model",
-        "models": MODELS,
+        "models_endpoint": "/api/my/v1/models",
     }

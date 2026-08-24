@@ -1,20 +1,36 @@
 """
-v1/analyze-model - Analyze source code with ONE Ollama model.
+v1/analyze-model - Analyze source code with ONE AI model.
 
-This is the single-model workhorse. The frontend calls it once per model,
-sequentially (one after another), so Ollama only ever handles one request at a
-time. That avoids the "response not yet ready" 503 that Ollama returns when it is
-still loading a model or when several requests contend for the runtime.
+Provider-agnostic inference: the model is discovered dynamically by the sibling
+action v1/models, which also detects the provider PROTOCOL. The frontend
+selects a model id and passes it here (optionally with a `protocol` hint that
+v1/models produced). Inference is then routed to the right API:
+
+  openai-compatible -> POST {base}/v1/chat/completions   (Bearer)
+  ollama            -> POST {base}/api/chat              (Bearer optional)
+  anthropic         -> POST {base}/v1/messages          (x-api-key)
+  gemini            -> POST {base}/v1beta/models/{model}:generateContent (?key=)
+
+If the protocol hint is missing, the backend re-detects it from AI_API_HOST
+with safe read-only probes (no inference requests are used for detection).
+
+The model id is used VERBATIM as returned by the provider; it is never
+transformed. The frontend only needs to send the selected model id (plus an
+optional backend-derived protocol/provider hint).
 
 Each call gets up to 3 minutes (180s) to connect and respond. The frontend
 drives the retry loop: 1 attempt + 4 retries with 3s pauses (5 total). If all 5
-fail the UI shows a "riprova" button for that model. The backend therefore
-performs a single attempt per invocation, bounded by the 180s timeout.
+fail the UI shows a "riprova" button. The backend performs a single attempt per
+invocation, bounded by the 180s timeout.
+
+The API key is never included in any response, log, or error message.
 
 Input:
-  - url:    URL of a raw source file to download and validate, OR
-  - code:   source code pasted directly
-  - model:  model id (glm-5.2 | kimi-k2.7-code | deepseek-v4-pro)
+  - url | code: source to analyze
+  - model:      exact provider model id (required)
+  - model_name: optional friendly name for the report
+  - protocol:   optional provider protocol hint (openai-compatible|ollama|
+                anthropic|gemini) produced by v1/models
   - filename, language: optional hints
 Output:
   { ok, source, model: <ModelResult> }
@@ -25,36 +41,22 @@ import re
 import time
 import urllib.request
 import urllib.error
+from urllib.parse import quote
 
-MODELS = {
-    "glm-5.2": {"id": "glm-5.2", "name": "GLM 5.2", "tag": "glm-5.2"},
-    "kimi-k2.7-code": {"id": "kimi-k2.7-code", "name": "Kimi K2.7 Code", "tag": "kimi-k2.7-code"},
-    "deepseek-v4-pro": {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "tag": "deepseek-v4-pro"},
-}
-
-# Per-call timeout: give the model up to 3 minutes (180s) to connect and
-# respond. The frontend drives the multi-attempt retry loop (4 retries with
-# 3s pauses -> 5 attempts total), so the backend performs a single attempt
-# per invocation. This keeps each HTTP request bounded and predictable.
 DEFAULT_MODEL_TIMEOUT = 180
 MAX_SOURCE_BYTES = 512 * 1024
 MAX_DOWNLOAD_BYTES = 1024 * 1024
 
-# Single attempt per call: the frontend handles the retry loop and shows the
-# "riprova" state on the button after 5 total failures.
-MAX_RETRIES = 0
-RETRY_BACKOFF = [3]  # seconds (unused when MAX_RETRIES == 0)
+DETECT_TIMEOUT = 12
+
+VALID_PROTOCOLS = ("openai-compatible", "ollama", "anthropic", "gemini")
+
+SYSTEM_PROMPT = "Rispondi solo con JSON valido, senza testo aggiuntivo."
+
 TRANSIENT_MARKERS = (
-    "not yet ready",
-    "loading model",
-    "model is loading",
-    "busy",
-    "try again",
-    "rate limit",
-    "too many requests",
-    "service unavailable",
+    "not yet ready", "loading model", "model is loading", "busy",
+    "try again", "rate limit", "too many requests", "service unavailable",
 )
-# HTTP status codes that are worth retrying (model loading / cloud busy / rate limit).
 RETRYABLE_HTTP_CODES = {429, 500, 502, 503, 504}
 
 
@@ -80,7 +82,26 @@ def request_method(args):
 
 
 # ---------------------------------------------------------------------------
-# Source acquisition
+# URL helpers (avoid /v1/v1/...)
+# ---------------------------------------------------------------------------
+def _norm_base(host):
+    return (host or "").strip().rstrip("/")
+
+
+def _v1_base(base):
+    return base if base.endswith("/v1") else base + "/v1"
+
+
+def _v1beta_base(base):
+    return base if base.endswith("/v1beta") else base + "/v1beta"
+
+
+def _safe_url(url):
+    return url.split("?", 1)[0] if "?" in url else url
+
+
+# ---------------------------------------------------------------------------
+# Source acquisition (unchanged behavior)
 # ---------------------------------------------------------------------------
 def guess_language(filename, code):
     if filename:
@@ -133,12 +154,10 @@ def download_source(url):
                 raise ValueError("File troppo grande (max 1 MB)")
             chunks.append(chunk)
         raw = b"".join(chunks)
-
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         text = raw.decode("latin-1", errors="replace")
-
     if "\x00" in text:
         raise ValueError("Il contenuto scaricato sembra binario, non codice sorgente")
     if len(text.strip()) == 0:
@@ -150,10 +169,8 @@ def acquire_source(data):
     url = (data.get("url") or "").strip()
     code = data.get("code")
     filename = (data.get("filename") or "").strip()
-
     if url and code:
         raise ValueError("Fornisci solo l'URL oppure solo il codice, non entrambi")
-
     if url:
         if not re.match(r"^https?://", url, re.I):
             raise ValueError("L'URL deve iniziare con http:// o https://")
@@ -164,10 +181,8 @@ def acquire_source(data):
         source_type = "code"
     else:
         raise ValueError("Indica un URL valido oppure incolla il codice sorgente")
-
     if len(text.encode("utf-8")) > MAX_SOURCE_BYTES:
         raise ValueError("Il codice supera il limite di 512 KB")
-
     language = (data.get("language") or "").strip() or guess_language(filename, text)
     lines = text.count("\n") + 1
     meta = {
@@ -182,7 +197,7 @@ def acquire_source(data):
 
 
 # ---------------------------------------------------------------------------
-# Ollama interaction (with retry for "response not yet ready")
+# Prompt + JSON extraction (unchanged)
 # ---------------------------------------------------------------------------
 def build_prompt(language, code):
     return (
@@ -237,99 +252,244 @@ def extract_json(text):
     return None
 
 
-def _is_transient(err):
-    """True when an error looks like a transient Ollama loading/busy state."""
-    msg = str(err).lower()
-    return any(m in msg for m in TRANSIENT_MARKERS)
-
-
-def call_ollama_with_retry(host, model_tag, prompt, timeout, api_key=None):
-    """
-    Call Ollama /api/chat (stream:false) for one model.
-
-    Retries on HTTP 429/503 "response not yet ready" or other transient
-    loading/busy/rate-limit errors, sleeping with backoff between attempts.
-    This lets Ollama (local or cloud) finish loading the model and respond,
-    instead of failing fast. When api_key is provided (Ollama Cloud) it is sent
-    as a Bearer token.
-    """
-    base = host.rstrip("/")
-    url = base + "/api/chat"
-    payload = json.dumps({
-        "model": model_tag,
-        "stream": False,
-        "messages": [
-            {"role": "system", "content": "Rispondi solo con JSON valido, senza testo aggiuntivo."},
-            {"role": "user", "content": prompt},
-        ],
-        "options": {"temperature": 0.2},
-    }).encode("utf-8")
-
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-
-    last_error = None
-    for attempt in range(MAX_RETRIES + 1):
-        req = urllib.request.Request(
-            url,
-            data=payload,
-            headers=headers,
-            method="POST",
-        )
+# ---------------------------------------------------------------------------
+# HTTP POST helper (credential-safe errors)
+# ---------------------------------------------------------------------------
+def _http_post_json(url, headers, payload, timeout):
+    data = json.dumps(payload).encode("utf-8")
+    h = dict(headers)
+    h.setdefault("Content-Type", "application/json")
+    h.setdefault("Accept", "application/json")
+    req = urllib.request.Request(url, data=data, headers=h, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+            body = resp.read().decode("utf-8", errors="replace")
+            status = getattr(resp, "status", None) or resp.getcode()
+    except urllib.error.HTTPError as e:
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-                raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
-            # Ollama can return 200 with an error body when the model is busy.
-            if isinstance(data, dict) and data.get("error"):
-                err_msg = str(data.get("error"))
-                if _is_transient(err_msg) and attempt < MAX_RETRIES:
-                    last_error = err_msg
-                    time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
-                    continue
-                raise RuntimeError(f"Ollama: {err_msg}")
-            msg = data.get("message") or {}
-            content = msg.get("content") or data.get("response") or ""
-            return content
-        except urllib.error.HTTPError as e:
-            body = ""
-            try:
-                body = e.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
-            err_text = body or e.reason or str(e)
-            # Auth errors are not transient: surface them clearly.
-            if e.code in (401, 403):
-                raise RuntimeError(
-                    f"Ollama autenticazione fallita (HTTP {e.code}). "
-                    "Verifica AI_API_KEY per Ollama Cloud."
-                )
-            # 429/503 "response not yet ready" / rate limit / model loading.
-            if (e.code in RETRYABLE_HTTP_CODES or _is_transient(err_text)) and attempt < MAX_RETRIES:
-                last_error = err_text
-                time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
-                continue
-            raise RuntimeError(f"Ollama HTTP {e.code}: {err_text}")
-        except urllib.error.URLError as e:
-            # Network/timeout level: retry only if it looks transient.
-            reason = e.reason if hasattr(e, "reason") else str(e)
-            if _is_transient(reason) and attempt < MAX_RETRIES:
-                last_error = reason
-                time.sleep(RETRY_BACKOFF[min(attempt, len(RETRY_BACKOFF) - 1)])
-                continue
-            raise
-    # Exhausted retries.
-    raise RuntimeError(
-        f"Ollama non ha risposto dopo {MAX_RETRIES} tentativi"
-        + (f" (ultimo errore: {last_error})" if last_error else "")
+            err_body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            err_body = ""
+        # Provider error bodies are echoed but credentials are never in them.
+        snippet = (err_body or e.reason or "")[:500]
+        if e.code in (401, 403):
+            raise RuntimeError("Autenticazione provider fallita (HTTP %d) su %s" % (e.code, _safe_url(url)))
+        raise RuntimeError("Provider HTTP %d su %s: %s" % (e.code, _safe_url(url), snippet))
+    except urllib.error.URLError as e:
+        reason = e.reason if hasattr(e, "reason") else str(e)
+        raise RuntimeError("Errore di rete verso %s: %s" % (_safe_url(url), reason))
+    return status, body
+
+
+def _http_get_json(url, headers, timeout):
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        body = resp.read().decode("utf-8", errors="replace")
+    return json.loads(body) if body else {}
+
+
+# ---------------------------------------------------------------------------
+# Provider-aware inference (one attempt; frontend drives the retry loop)
+# ---------------------------------------------------------------------------
+def _messages(system, prompt):
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+    ]
+
+
+def infer_openai(base, key, model, prompt, timeout):
+    url = _v1_base(base) + "/chat/completions"
+    headers = {}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    payload = {
+        "model": model,
+        "messages": _messages(SYSTEM_PROMPT, prompt),
+        "temperature": 0.2,
+    }
+    _, body = _http_post_json(url, headers, payload, timeout)
+    data = json.loads(body)
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not choices:
+        # Some OpenAI-compatible gateways return {"content": {...}} or {"response": ...}
+        return str(data.get("response") or data.get("content") or "")
+    msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+    return msg.get("content") or ""
+
+
+def infer_ollama(base, key, model, prompt, timeout):
+    url = base + "/api/chat"
+    headers = {}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": _messages(SYSTEM_PROMPT, prompt),
+        "options": {"temperature": 0.2},
+    }
+    _, body = _http_post_json(url, headers, payload, timeout)
+    data = json.loads(body)
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError("Ollama: %s" % data.get("error"))
+    msg = data.get("message") or {}
+    return msg.get("content") or data.get("response") or ""
+
+
+def infer_anthropic(base, key, model, prompt, timeout):
+    url = _v1_base(base) + "/messages"
+    headers = {"anthropic-version": "2023-06-01"}
+    if key:
+        headers["x-api-key"] = key
+    payload = {
+        "model": model,
+        "max_tokens": 4096,
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+    }
+    _, body = _http_post_json(url, headers, payload, timeout)
+    data = json.loads(body)
+    content = data.get("content") if isinstance(data, dict) else None
+    if not isinstance(content, list):
+        return ""
+    return "".join(
+        str(b.get("text", "")) for b in content
+        if isinstance(b, dict) and b.get("type") == "text"
     )
 
 
-def analyze_one_model(host, model, prompt, timeout, api_key=None):
+def infer_gemini(base, key, model, prompt, timeout):
+    url = _v1beta_base(base) + "/models/" + quote(model, safe="") + ":generateContent"
+    headers = {}
+    if key:
+        headers["x-goog-api-key"] = key
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+        "generationConfig": {"temperature": 0.2},
+    }
+    _, body = _http_post_json(url, headers, payload, timeout)
+    data = json.loads(body)
+    cands = data.get("candidates") if isinstance(data, dict) else None
+    if not cands:
+        return ""
+    parts = cands[0].get("content", {}).get("parts", []) if isinstance(cands[0], dict) else []
+    return "".join(str(p.get("text", "")) for p in parts if isinstance(p, dict))
+
+
+_INFER = {
+    "openai-compatible": infer_openai,
+    "ollama": infer_ollama,
+    "anthropic": infer_anthropic,
+    "gemini": infer_gemini,
+}
+
+
+# ---------------------------------------------------------------------------
+# Protocol detection fallback (safe read-only probes; no inference requests)
+# ---------------------------------------------------------------------------
+def _probe_get(url, headers, timeout):
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        body = resp.read().decode("utf-8", errors="replace")
+        status = getattr(resp, "status", None) or resp.getcode()
+    return status, body
+
+
+def _looks_openai(body):
+    try:
+        data = json.loads(body) if body else {}
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("data"), list)
+
+
+def _looks_ollama(body):
+    try:
+        data = json.loads(body) if body else {}
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("models"), list)
+
+
+def _looks_anthropic(body):
+    try:
+        data = json.loads(body) if body else {}
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("data"), list) \
+        and "display_name" in (data.get("data") or [{}])[0]
+
+
+def _looks_gemini(body):
+    try:
+        data = json.loads(body) if body else {}
+    except (ValueError, TypeError):
+        return False
+    return isinstance(data, dict) and isinstance(data.get("models"), list)
+
+
+def detect_protocol(host, key):
+    """Detect the provider protocol from AI_API_HOST via read-only probes."""
+    base = _norm_base(host)
+    if not base:
+        return "openai-compatible"
+    # 1) OpenAI-compatible /v1/models (Bearer)
+    for url in (_v1_base(base) + "/models", base + "/models"):
+        if url == base + "/models" and base.endswith("/v1"):
+            continue
+        headers = {"Accept": "application/json"}
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        try:
+            _, body = _probe_get(url, headers, DETECT_TIMEOUT)
+            if _looks_openai(body) and not _looks_anthropic(body):
+                return "openai-compatible"
+        except Exception:  # noqa: BLE001
+            pass
+    # 2) Ollama /api/tags
+    try:
+        headers = {"Accept": "application/json"}
+        if key:
+            headers["Authorization"] = "Bearer " + key
+        _, body = _probe_get(base + "/api/tags", headers, DETECT_TIMEOUT)
+        if _looks_ollama(body):
+            return "ollama"
+    except Exception:  # noqa: BLE001
+        pass
+    # 3) Anthropic /v1/models (x-api-key)
+    try:
+        headers = {"Accept": "application/json", "anthropic-version": "2023-06-01"}
+        if key:
+            headers["x-api-key"] = key
+        _, body = _probe_get(_v1_base(base) + "/models", headers, DETECT_TIMEOUT)
+        if _looks_anthropic(body):
+            return "anthropic"
+    except Exception:  # noqa: BLE001
+        pass
+    # 4) Gemini /v1beta/models
+    try:
+        headers = {"Accept": "application/json"}
+        if key:
+            headers["x-goog-api-key"] = key
+        _, body = _probe_get(_v1beta_base(base) + "/models", headers, DETECT_TIMEOUT)
+        if _looks_gemini(body):
+            return "gemini"
+    except Exception:  # noqa: BLE001
+        pass
+    # Fallback: assume OpenAI-compatible (most common).
+    return "openai-compatible"
+
+
+# ---------------------------------------------------------------------------
+# Analysis
+# ---------------------------------------------------------------------------
+def analyze_one_model(host, api_key, model_id, model_name, prompt, protocol, timeout):
     out = {
-        "id": model["id"],
-        "name": model["name"],
+        "id": model_id,
+        "name": model_name or model_id,
         "ok": False,
         "risk_level": "none",
         "summary": "",
@@ -337,8 +497,10 @@ def analyze_one_model(host, model, prompt, timeout, api_key=None):
         "report": "",
         "error": None,
     }
+    base = _norm_base(host)
+    infer = _INFER.get(protocol, infer_openai)
     try:
-        content = call_ollama_with_retry(host, model["tag"], prompt, timeout, api_key=api_key)
+        content = infer(base, api_key, model_id, prompt, timeout)
         parsed = extract_json(content) or {}
         out["report"] = content
         out["risk_level"] = str(parsed.get("risk_level") or "none").lower()
@@ -372,39 +534,40 @@ def main(args, ctx=None):
         return {
             "ok": True,
             "service": "securitycheck-model",
-            "models": [m["name"] for m in MODELS.values()],
+            "models_endpoint": "/api/my/v1/models",
         }
 
     host = getattr(ctx, "AI_API_HOST", None) if ctx else None
     if not host:
         return {
             "ok": False,
-            "error": "Ollama non configurato. Imposta AI_API_HOST nel file .env e ridistribuisci.",
+            "error": "Provider AI non configurato. Imposta AI_API_HOST nel file .env e ridistribuisci.",
         }
     api_key = getattr(ctx, "AI_API_KEY", None) if ctx else None
 
     data = request_data(args)
 
     model_id = str(data.get("model") or "").strip()
-    if model_id not in MODELS:
+    if not model_id:
         return {
             "ok": False,
-            "error": f"Modello non valido: {model_id or '(vuoto)'}. Usa uno tra: "
-                     + ", ".join(MODELS.keys()),
+            "error": "Nessun modello selezionato. Apri il selettore \"AI Model\" e scegli un modello.",
         }
-    model = MODELS[model_id]
+    model_name = str(data.get("model_name") or "").strip() or model_id
 
-    # No timeout cap: the caller may pass an explicit timeout, otherwise we
-    # wait indefinitely for the model to respond when it is free.
+    # Protocol hint (backend-derived from v1/models); re-detect if absent.
+    protocol = str(data.get("protocol") or "").strip().lower()
+    if protocol not in VALID_PROTOCOLS:
+        protocol = detect_protocol(host, api_key)
+
     timeout = DEFAULT_MODEL_TIMEOUT
     req_timeout = data.get("timeout")
     if req_timeout:
         try:
-            timeout = int(req_timeout) if int(req_timeout) > 0 else None
+            timeout = int(req_timeout) if int(req_timeout) > 0 else DEFAULT_MODEL_TIMEOUT
         except (TypeError, ValueError):
             pass
 
-    # Acquire and validate the source code.
     try:
         code, meta = acquire_source(data)
     except ValueError as e:
@@ -416,10 +579,11 @@ def main(args, ctx=None):
         return {"ok": False, "error": f"Errore acquisizione sorgente: {e}"}
 
     prompt = build_prompt(meta["language"], code)
-    model_result = analyze_one_model(host, model, prompt, timeout, api_key=api_key)
+    model_result = analyze_one_model(host, api_key, model_id, model_name, prompt, protocol, timeout)
 
     return {
         "ok": True,
         "source": meta,
         "model": model_result,
+        "protocol": protocol,
     }

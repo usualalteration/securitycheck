@@ -2,27 +2,27 @@
 v1/models - Provider-agnostic AI model discovery.
 
 Discovers every text/code-generation model accessible with the configured
-server-side AI_API_HOST + AI_API_KEY, without ever exposing the key to the
+server-side AI_BASE_URL + AI_API_KEY, without ever exposing the key to the
 browser, and without hardcoding any model list.
 
 Architecture:
 
   GET /api/my/v1/models
         ↓
-  discover(AI_API_HOST, AI_API_KEY)
+    discover(AI_BASE_URL, AI_API_KEY)
         ↓
   provider adapters (tried in host-hinted order, response shape is authoritative)
-    ├── OpenAI-compatible   GET {base}/v1/models   (Bearer)        -> {"data":[...]}
-    ├── Anthropic          GET {base}/v1/models    (x-api-key)      -> {"data":[...]}
-    ├── Google Gemini      GET {base}/v1beta/models (?key= / header)-> {"models":[...]}
+    ├── OpenAI-compatible   GET {base}/models     (Bearer)        -> {"data":[...]}
+    ├── Anthropic          GET {base}/models      (x-api-key)      -> {"data":[...]}
+    ├── Google Gemini      GET {base}/models      (?key= / header)-> {"models":[...]}
     └── Ollama             GET {base}/api/tags      (Bearer optional)-> {"models":[...]}
         ↓
   normalize -> filter -> default -> {ok, models, default, provider, protocol, ...}
 
 Hostname is used only to choose the probe ORDER; the actual protocol is decided
 by which adapter returns a valid model-listing response. Unknown hosts are
-probed safely with read-only GET requests in the order /v1/models, /models,
-/api/tags and the response format determines the protocol.
+probed safely with read-only GET requests in the order /models, /api/tags and
+the response format determines the protocol.
 
 The API key is NEVER included in any response, log, error message, or reported
 endpoint. Reported endpoints strip query-string credentials.
@@ -80,9 +80,9 @@ HOST_BRAND = (
 # ---------------------------------------------------------------------------
 # URL / host helpers
 # ---------------------------------------------------------------------------
-def _norm_base(host):
-    """Strip trailing slashes; never produces /v1/v1/... downstream."""
-    return (host or "").strip().rstrip("/")
+def _norm_base(base_url):
+    """Strip trailing slashes from the configured base URL."""
+    return (base_url or "").strip().rstrip("/")
 
 
 def _hostname(base):
@@ -97,15 +97,6 @@ def _is_local(h):
         or h.startswith("10.") or h.startswith("172.16.") or h.startswith("172.17.") \
         or h.startswith("172.18.") or h.startswith("172.19.") or h.startswith("172.2") \
         or h.startswith("172.3") or h == ""
-
-
-def _v1_base(base):
-    """Base for /v1/* endpoints, avoiding /v1/v1/..."""
-    return base if base.endswith("/v1") else base + "/v1"
-
-
-def _v1beta_base(base):
-    return base if base.endswith("/v1beta") else base + "/v1beta"
 
 
 def _provider_display(base):
@@ -199,7 +190,7 @@ def _pick_default(models):
 def adapter_openai(base, key, timeout):
     """OpenAI-compatible: GET /v1/models (Bearer). Accepts {data:[...]}."""
     brand = _provider_display(base)
-    urls = [_v1_base(base) + "/models", base + "/models"]
+    urls = [base + "/models"]
     seen = set()
     for url in urls:
         if url in seen:
@@ -252,7 +243,7 @@ def adapter_openai(base, key, timeout):
 def adapter_anthropic(base, key, timeout):
     """Anthropic: GET /v1/models with x-api-key + anthropic-version."""
     brand = "Anthropic"
-    url = _v1_base(base) + "/models"
+    url = base + "/models"
     headers = {
         "Accept": "application/json",
         "User-Agent": "securitycheck/1.0 (+discovery)",
@@ -301,7 +292,7 @@ def adapter_anthropic(base, key, timeout):
 def adapter_gemini(base, key, timeout):
     """Google Gemini: GET /v1beta/models (?key= or x-goog-api-key)."""
     brand = "Google Gemini"
-    base_url = _v1beta_base(base) + "/models"
+    base_url = base + "/models"
     headers = {"Accept": "application/json", "User-Agent": "securitycheck/1.0 (+discovery)"}
     if key:
         headers["x-goog-api-key"] = key
@@ -353,7 +344,7 @@ def adapter_gemini(base, key, timeout):
 def adapter_ollama(base, key, timeout):
     """Ollama: GET /api/tags (Bearer optional). Accepts {models:[...]}."""
     brand = "Ollama"
-    urls = [base + "/api/tags", _v1_base(base) + "/models", base + "/models"]
+    urls = [base + "/api/tags", base + "/models"]
     seen = set()
     for url in urls:
         if url in seen:
@@ -429,7 +420,7 @@ def discover_models(host, api_key):
     base = _norm_base(host)
     if not base:
         return _safe_error(
-            "Provider AI non configurato. Imposta AI_API_HOST nel file .env e ridistribuisci.",
+            "Provider AI non configurato. Imposta AI_BASE_URL nel file .env e ridistribuisci.",
             "config",
         )
 
@@ -505,6 +496,6 @@ def main(args, ctx=None):
             "Usa GET /api/my/v1/models per scoprire i modelli disponibili.",
             "method",
         )
-    host = getattr(ctx, "AI_API_HOST", None) if ctx else None
+    base_url = getattr(ctx, "AI_BASE_URL", None) if ctx else None
     api_key = getattr(ctx, "AI_API_KEY", None) if ctx else None
-    return discover_models(host, api_key)
+    return discover_models(base_url, api_key)

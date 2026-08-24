@@ -191,7 +191,7 @@ export async function analyzeWithModel(
     const message =
       data?.error ||
       (response.status === 500
-        ? "Provider AI non configurato. Imposta AI_API_HOST nel file .env e ridistribuisci."
+        ? "Provider AI non configurato. Imposta AI_BASE_URL nel file .env e ridistribuisci."
         : `Richiesta fallita: ${response.status}`);
     return { ok: false, error: message };
   }

@@ -1,79 +1,117 @@
 # SecurityCheck
 
-Web application per l'**analisi automatica della sicurezza del codice sorgente** con tre
-modelli AI eseguiti in parallelo tramite [Ollama](https://ollama.com).
+Web application for **automated source code security analysis**. The user picks
+**one AI model at a time** from a catalog discovered at runtime from the
+configured provider, and gets back a structured vulnerability report.
 
-Frontend in React + TypeScript, backend serverless su **Apache OpenWhisk / Nuvolaris**
-(action `v1/analyze`).
+React + TypeScript frontend, serverless backend on **Apache OpenWhisk /
+Nuvolaris** (`v1/models` + `v1/analyze-model`).
 
-## Come funziona
+The app is **provider-agnostic**: no model list is hardcoded. Point it at any
+endpoint that speaks one of four protocols and it discovers what is there.
 
-1. L'utente sceglie una modalità: **URL di un file** (Raw GitHub / Gist) oppure
-   **incolla il codice** in un'area di testo.
-2. Se viene fornito un URL, il backend scarica e valida il contenuto; se viene
-   incollato il codice, viene usato direttamente.
-3. Il codice è inviato **in parallelo** a tre modelli Ollama:
-   - [GLM 5.2](https://ollama.com/library/glm-5.2)
-   - [Kimi K2.7 Code](https://ollama.com/library/kimi-k2.7-code)
-   - [DeepSeek V4 Pro](https://ollama.com/library/deepseek-v4-pro)
-4. Ogni modello restituisce un report strutturato con vulnerabilità, severità,
-   descrizione e raccomandazione.
-5. L'app mostra i **report separati per modello** e un **confronto finale** che
-   evidenzia:
-   - vulnerabilità **comuni** (concordanti tra più modelli),
-   - vulnerabilità **segnalate da un solo modello**,
-   - **livello di rischio complessivo** e riepilogo conclusivo.
+## How it works
 
-## Configurazione di Ollama
+1. On load the frontend calls `GET /api/my/v1/models`. The backend probes the
+   configured `AI_BASE_URL` with read-only requests, detects the provider
+   protocol, and returns the catalog of text/code-generation models plus a
+   suggested default. **The API key never reaches the browser** — only the
+   action sees it.
+2. The user selects a model from the dropdown.
+3. The user picks an input mode: **file URL** (Raw GitHub / Gist) or **paste the
+   code** into a text area.
+4. On submit the frontend `POST`s `/api/my/v1/analyze-model` with the selected
+   model id. If a URL was given, the backend downloads and validates the
+   content; pasted code is used directly.
+5. The backend routes one inference call to the detected protocol and returns a
+   structured report: overall risk level, summary, and a list of findings with
+   title, severity, category, line, description and recommendation.
+6. The UI streams the report in and reveals the findings one by one.
 
-Nel file `.env` sono presenti le variabili per Ollama:
+Only one model runs per analysis. To compare models, run the analysis again
+with a different one selected.
+
+### Supported protocols
+
+The protocol is auto-detected — the hostname only chooses the probe *order*, the
+response shape decides. Unknown hosts are probed safely with read-only `GET`s.
+
+| Protocol | Discovery | Inference | Auth |
+|---|---|---|---|
+| OpenAI-compatible | `GET {base}/models` | `POST {base}/chat/completions` | `Bearer` |
+| Anthropic | `GET {base}/models` | `POST {base}/messages` | `x-api-key` |
+| Google Gemini | `GET {base}/models` | `POST {base}/models/{model}:generateContent` | `?key=` |
+| Ollama | `GET {base}/api/tags` | `POST {base}/api/chat` | `Bearer` (optional) |
+
+Model ids are used **verbatim** as the provider returns them; they are never
+rewritten.
+
+## Configuration
+
+Two variables in `.env`:
 
 ```env
-# Base URL dell'istanza Ollama
-#  - locale:   http://localhost:11434
-#  - cloud:    https://ollama.com  (richiede AI_API_KEY)
-AI_API_HOST=
+# Base URL of the AI provider. Examples:
+#  - local Ollama:      http://localhost:11434
+#  - Ollama Cloud:      https://ollama.com          (requires AI_API_KEY)
+#  - OpenAI-compatible: https://api.openai.com/v1   (requires AI_API_KEY)
+AI_BASE_URL=
 
-# Obbligatoria solo per Ollama Cloud (https://ollama.com)
-# lascia vuota se usi un'istanza locale senza autenticazione
+# Required by providers that authenticate requests.
+# Leave empty for a local instance without authentication.
 AI_API_KEY=
 ```
 
-Per attivare l'analisi:
+Then redeploy:
 
-1. Avvia Ollama (`ollama serve`) oppure usa Ollama Cloud.
-2. Assicurati che i modelli richiesti siano disponibili:
-   - `glm-5.2`
-   - `kimi-k2.7-code`
-   - `deepseek-v4-pro`
-   (con Ollama locale: `ollama pull glm-5.2` ecc.)
-3. Imposta `AI_API_HOST` (e `AI_API_KEY` per il cloud) nel file `.env`.
-4. Ridistribuisci:
-   ```bash
-   timeout 120 ops ide deploy
-   ```
+```bash
+timeout 120 ops ide deploy
+```
 
-Se `AI_API_HOST` (o `AI_API_KEY` per il cloud) resta vuoto, l'action
-fallisce in modo controllato segnalando "Required secret ... is not configured".
+With a local Ollama, start it (`ollama serve`) and pull at least one model
+(`ollama pull <model>`) — the dropdown lists whatever `ollama list` reports.
 
-## Architettura del backend
+If `AI_BASE_URL` is empty, both actions fail gracefully with
+"Provider AI non configurato. Imposta AI_BASE_URL nel file `.env` e ridistribuisci."
+`AI_API_KEY` may stay empty: it is required by the provider, not by the actions.
+The key is never included in any response, log, error message, or reported
+endpoint.
 
-- `v1/analyze` (GET): endpoint informativo (elenca i modelli disponibili).
-- `v1/analyze-model` (POST): analizza il sorgente con **un solo modello**.
-  Il frontend la chiama **una volta per modello, sequenzialmente** (uno dopo
-  l'altro), così Ollama non va in contenzione e ogni modello ha a disposizione
-  tutto il tempo necessario (timeout action di 5 minuti per ciascun modello).
-  L'action ritenta automaticamente sugli errori transienti `503 / 429 / "response
-  not yet ready"` con backoff, per tollerare il caricamento dei modelli.
+## Backend architecture
 
-## Sviluppo
+- **`v1/models` (GET)** — provider-agnostic model discovery. Probes the
+  adapters in host-hinted order, normalizes the result, filters out non-chat
+  models (embeddings, TTS, vision-only, …) and picks a default. Returns
+  `{ok, models, default, provider, protocol, endpoint, count}`.
+- **`v1/analyze-model` (POST)** — analyses the source with **a single model**.
+  Body: `{ url | code, model, model_name?, protocol?, filename?, language? }`.
+  The `protocol` hint comes from `v1/models`; without it the backend re-detects
+  it. One inference attempt per invocation, bounded by a 180s timeout.
+- **`v1/analyze` (GET)** — service descriptor only. It no longer performs any
+  analysis and no longer hardcodes a model list; it just points at the two
+  endpoints above.
 
-- Frontend: `src/` (React + Tailwind). Pagina principale: `src/pages/Index.tsx`.
-- Client API: `src/lib/security.ts`, aggregazione confronto: `src/lib/compare.ts`.
-- Backend: `packages/v1/analyze/analyze.py` (info, modificabile) e
-  `packages/v1/analyze-model/analyze_model.py` (analisi singolo modello,
-  modificabile). I `__main__.py` sono wrapper generati, non modificare.
-- Endpoint: `GET /api/my/v1/analyze` (info) e
-  `POST /api/my/v1/analyze-model` con body `{ url | code, model, filename?, language? }`.
+### Retries and timeouts
+
+The retry loop lives in the **frontend**: 1 attempt + 4 retries with 3-second
+pauses (5 total), each bounded client-side by a 3-minute `AbortController` that
+matches the backend's 180s timeout. After 5 failures the model section shows a
+"riprova" button. The backend classifies transient failures (`429`, `500`,
+`502`, `503`, `504`, and "loading model" / "not yet ready" / "busy" responses)
+so a model that is still warming up is retried rather than reported as broken.
+
+### Input limits
+
+- Downloaded source: max 1 MB.
+- Analysed source: max 512 KB.
+
+## Development
+
+- Frontend: `src/` (React + Tailwind). Main page: `src/pages/Index.tsx`.
+- API client: `src/lib/security.ts`.
+- Backend: `packages/v1/models/models.py` (discovery) and
+  `packages/v1/analyze-model/analyze_model.py` (single-model analysis);
+  `packages/v1/analyze/analyze.py` is the info endpoint. All three are editable.
+  The `__main__.py` files are generated wrappers — do not edit them.
 
 - [Code Security Checker](code-security-checker.md)

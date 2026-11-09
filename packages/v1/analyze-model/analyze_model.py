@@ -6,12 +6,12 @@ action v1/models, which also detects the provider PROTOCOL. The frontend
 selects a model id and passes it here (optionally with a `protocol` hint that
 v1/models produced). Inference is then routed to the right API:
 
-  openai-compatible -> POST {base}/v1/chat/completions   (Bearer)
+    openai-compatible -> POST {base}/chat/completions      (Bearer)
   ollama            -> POST {base}/api/chat              (Bearer optional)
-  anthropic         -> POST {base}/v1/messages          (x-api-key)
-  gemini            -> POST {base}/v1beta/models/{model}:generateContent (?key=)
+    anthropic         -> POST {base}/messages              (x-api-key)
+    gemini            -> POST {base}/models/{model}:generateContent (?key=)
 
-If the protocol hint is missing, the backend re-detects it from AI_API_HOST
+If the protocol hint is missing, the backend re-detects it from AI_BASE_URL
 with safe read-only probes (no inference requests are used for detection).
 
 The model id is used VERBATIM as returned by the provider; it is never
@@ -82,18 +82,10 @@ def request_method(args):
 
 
 # ---------------------------------------------------------------------------
-# URL helpers (avoid /v1/v1/...)
+# URL helpers
 # ---------------------------------------------------------------------------
-def _norm_base(host):
-    return (host or "").strip().rstrip("/")
-
-
-def _v1_base(base):
-    return base if base.endswith("/v1") else base + "/v1"
-
-
-def _v1beta_base(base):
-    return base if base.endswith("/v1beta") else base + "/v1beta"
+def _norm_base(base_url):
+    return (base_url or "").strip().rstrip("/")
 
 
 def _safe_url(url):
@@ -299,7 +291,7 @@ def _messages(system, prompt):
 
 
 def infer_openai(base, key, model, prompt, timeout):
-    url = _v1_base(base) + "/chat/completions"
+    url = base + "/chat/completions"
     headers = {}
     if key:
         headers["Authorization"] = "Bearer " + key
@@ -338,7 +330,7 @@ def infer_ollama(base, key, model, prompt, timeout):
 
 
 def infer_anthropic(base, key, model, prompt, timeout):
-    url = _v1_base(base) + "/messages"
+    url = base + "/messages"
     headers = {"anthropic-version": "2023-06-01"}
     if key:
         headers["x-api-key"] = key
@@ -361,7 +353,7 @@ def infer_anthropic(base, key, model, prompt, timeout):
 
 
 def infer_gemini(base, key, model, prompt, timeout):
-    url = _v1beta_base(base) + "/models/" + quote(model, safe="") + ":generateContent"
+    url = base + "/models/" + quote(model, safe="") + ":generateContent"
     headers = {}
     if key:
         headers["x-goog-api-key"] = key
@@ -432,14 +424,12 @@ def _looks_gemini(body):
 
 
 def detect_protocol(host, key):
-    """Detect the provider protocol from AI_API_HOST via read-only probes."""
+    """Detect the provider protocol from AI_BASE_URL via read-only probes."""
     base = _norm_base(host)
     if not base:
         return "openai-compatible"
-    # 1) OpenAI-compatible /v1/models (Bearer)
-    for url in (_v1_base(base) + "/models", base + "/models"):
-        if url == base + "/models" and base.endswith("/v1"):
-            continue
+    # 1) OpenAI-compatible /models (Bearer)
+    for url in (base + "/models",):
         headers = {"Accept": "application/json"}
         if key:
             headers["Authorization"] = "Bearer " + key
@@ -459,22 +449,22 @@ def detect_protocol(host, key):
             return "ollama"
     except Exception:  # noqa: BLE001
         pass
-    # 3) Anthropic /v1/models (x-api-key)
+    # 3) Anthropic /models (x-api-key)
     try:
         headers = {"Accept": "application/json", "anthropic-version": "2023-06-01"}
         if key:
             headers["x-api-key"] = key
-        _, body = _probe_get(_v1_base(base) + "/models", headers, DETECT_TIMEOUT)
+        _, body = _probe_get(base + "/models", headers, DETECT_TIMEOUT)
         if _looks_anthropic(body):
             return "anthropic"
     except Exception:  # noqa: BLE001
         pass
-    # 4) Gemini /v1beta/models
+    # 4) Gemini /models
     try:
         headers = {"Accept": "application/json"}
         if key:
             headers["x-goog-api-key"] = key
-        _, body = _probe_get(_v1beta_base(base) + "/models", headers, DETECT_TIMEOUT)
+        _, body = _probe_get(base + "/models", headers, DETECT_TIMEOUT)
         if _looks_gemini(body):
             return "gemini"
     except Exception:  # noqa: BLE001
@@ -537,11 +527,11 @@ def main(args, ctx=None):
             "models_endpoint": "/api/my/v1/models",
         }
 
-    host = getattr(ctx, "AI_API_HOST", None) if ctx else None
-    if not host:
+    base_url = getattr(ctx, "AI_BASE_URL", None) if ctx else None
+    if not base_url:
         return {
             "ok": False,
-            "error": "Provider AI non configurato. Imposta AI_API_HOST nel file .env e ridistribuisci.",
+            "error": "Provider AI non configurato. Imposta AI_BASE_URL nel file .env e ridistribuisci.",
         }
     api_key = getattr(ctx, "AI_API_KEY", None) if ctx else None
 
@@ -558,7 +548,7 @@ def main(args, ctx=None):
     # Protocol hint (backend-derived from v1/models); re-detect if absent.
     protocol = str(data.get("protocol") or "").strip().lower()
     if protocol not in VALID_PROTOCOLS:
-        protocol = detect_protocol(host, api_key)
+        protocol = detect_protocol(base_url, api_key)
 
     timeout = DEFAULT_MODEL_TIMEOUT
     req_timeout = data.get("timeout")
@@ -579,7 +569,7 @@ def main(args, ctx=None):
         return {"ok": False, "error": f"Errore acquisizione sorgente: {e}"}
 
     prompt = build_prompt(meta["language"], code)
-    model_result = analyze_one_model(host, api_key, model_id, model_name, prompt, protocol, timeout)
+    model_result = analyze_one_model(base_url, api_key, model_id, model_name, prompt, protocol, timeout)
 
     return {
         "ok": True,
